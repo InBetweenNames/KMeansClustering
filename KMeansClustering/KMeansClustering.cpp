@@ -148,6 +148,7 @@ std::tuple<std::vector<std::vector<Eigen::Index>>,Eigen::Index> findOptimalClust
 
 	std::mutex fileMutex;
 	std::ofstream testedKs{ "optimal.csv", std::ofstream::app };
+	testedKs.precision(17);
 	if (!exists)
 	{
 		testedKs << "K,minRSS,AICminRSSk" << std::endl;
@@ -247,12 +248,37 @@ std::tuple<std::vector<std::vector<Eigen::Index>>,Eigen::Index> findOptimalClust
 	return { bestClustering, bestK };
 }
 
+void writeClusters(const std::vector<std::string>& ids, const std::vector<std::vector<Eigen::Index>>& clusters, const std::string& filename)
+{
+	std::ofstream f{ filename };
+	//f << clusters.size() << std::endl;
+
+	for (size_t i = 0; i < clusters.size(); i++)
+	{
+		for (const auto& doc : clusters[i])
+		{
+			f << ids[doc] << "\tcluster" << i << std::endl;
+		}
+	}
+}
+
 int __cdecl main(int argc, char* argv[])
 {
 	if (argc < 3)
 	{
-		std::cout << "Usage: " << argv[0] << " <vectorfile> <outfile>" << std::endl;
+		std::cout << "Usage: " << argv[0] << " <vectorfile> <outfile> (-K <n>)" << std::endl;
 		return 0;
+	}
+	bool optimize = false;
+	int K = 0;
+
+	if (argc == 3)
+	{
+		optimize = true;
+	}
+	else if (argc == 5)
+	{
+		K = std::stoi(argv[4]);
 	}
 
 	const std::string vectorFile{ argv[1] };
@@ -262,14 +288,30 @@ int __cdecl main(int argc, char* argv[])
 
 	const auto docVecs = readVectors(vectorFile);
 
-	std::cout << "Determining optimal clustering using heuristic" << std::endl;
-	const auto res = findOptimalClustering(docVecs.second);
-	const auto K = std::get<1>(res);
-	const auto clusters = std::get<0>(res);
+	std::vector<std::vector<Eigen::Index>> clusters;
+	if (optimize)
+	{
+		std::cout << "Determining optimal clustering using heuristic" << std::endl;
+		const auto res = findOptimalClustering(docVecs.second);
+		K = std::get<1>(res);
+		clusters = std::get<0>(res);
 
-	std::cout << "Optimal clustering has K = " << K << std::endl;
+		std::cout << "Optimal clustering has K = " << K << std::endl;
+	}
+	else
+	{
+		std::cout << "Using K = " << K << std::endl;
+
+		std::mt19937 rnd{ std::random_device{}() };
+
+		const auto res = computeKMeans(docVecs.second, K, rnd);
+
+		clusters = std::get<0>(res);
+	}
 
 	std::cout << "Writing optimal clustering to " << outFile << std::endl;
+
+	writeClusters(docVecs.first, clusters, outFile);
 
     return 0;
 }
