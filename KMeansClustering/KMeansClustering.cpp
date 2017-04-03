@@ -1,11 +1,16 @@
 // KMeansClustering.cpp : Defines the entry point for the console application.
 //
 
+#define EIGEN_MAX_ALIGN_BYTES 32
+
 #include <Eigen/Core>
+#include <atomic>
 #include <fstream>
+#include <mutex>
 #include <iostream>
 #include <random>
 #include <string>
+#include <thread>
 #include <tuple>
 #include <vector>
 
@@ -37,16 +42,18 @@ std::pair<std::vector<std::string>, Eigen::MatrixXd> readVectors(const std::stri
 
 }
 
-template<typename T>
-double RSSk(const T& centroid, const std::vector<Eigen::Index>& cluster, const Eigen::MatrixXd& X)
+double RSSk(const Eigen::VectorXd& centroid, const std::vector<Eigen::Index>& cluster, const Eigen::MatrixXd& X)
 {
-	double sum = 0;
 
-	for (const auto& i : cluster)
+	Eigen::MatrixXd clusterVectors{ X.rows(), cluster.size() };
+
+	for (size_t i = 0; i < cluster.size(); i++)
 	{
-		const auto diff = X.col(i) - centroid;
-		sum += diff.squaredNorm();
+		clusterVectors.col(i) = X.col(cluster[i]);
 	}
+
+	const auto diffs = clusterVectors.colwise() - centroid;
+	const auto sum = diffs.colwise().squaredNorm().sum();
 
 	return sum;
 }
@@ -75,12 +82,14 @@ std::tuple<std::vector<std::vector<Eigen::Index>>, double> computeKMeans(const E
 		centroids.col(i) = X.col(seeds(i));
 	}
 
-	double prevRSS = -2;
-	double currRSS = -1;
+	//double prevRSS = std::numeric_limits<double>::lowest();
+	//double currRSS = -1;
 
 	std::vector<std::vector<Eigen::Index>> clusters;
 
-	while (currRSS - prevRSS > 0.0001)
+	int nIterations = 0;
+	//Perform 10 iterations maximum
+	while (/*std::abs(currRSS - prevRSS) > 100 &&*/ nIterations < 15)
 	{
 		clusters = std::vector<std::vector<Eigen::Index>>(K);
 		//Reassignment of vectors
@@ -96,28 +105,38 @@ std::tuple<std::vector<std::vector<Eigen::Index>>, double> computeKMeans(const E
 		for (Eigen::Index i = 0; i < K; i++)
 		{
 			Eigen::VectorXd sum = Eigen::VectorXd::Zero(X.rows());
-			for (Eigen::Index j = 0; j < clusters[i].size(); j++)
+
+			for (const auto j : clusters[i])
 			{
-				sum += X.col(clusters[i][j]);
+				sum += X.col(j);
 			}
 
 			centroids.col(i) = sum / clusters[i].size();
 		}
 
-		prevRSS = currRSS;
-		currRSS = RSS(centroids, clusters, X);
+		/*prevRSS = currRSS;
+		currRSS = RSS(centroids, clusters, X);*/
+		nIterations++;
 	}
+
+	//std::cout << "Converged in " << nIterations << " iterations" << std::endl;
+
+	double currRSS = RSS(centroids, clusters, X);
 
 	return { clusters, currRSS };
 
 }
 
+bool is_file_exist(const std::string&fileName)
+{
+	std::ifstream infile(fileName);
+	return infile.good();
+}
+
 std::tuple<std::vector<std::vector<Eigen::Index>>,Eigen::Index> findOptimalClustering(const Eigen::MatrixXd& X)
 {
-	//Select random seeds deterministically (use pi to show this value is not chosen favourably)
-	std::mt19937 rnd{ 314159 };
 
-	const Eigen::Index maxK = 100; //TODO: change to X.cols()
+	const Eigen::Index maxK = X.cols();
 	constexpr Eigen::Index maxIter = 10;
 
 	//Try K up to a limit
@@ -125,9 +144,80 @@ std::tuple<std::vector<std::vector<Eigen::Index>>,Eigen::Index> findOptimalClust
 	Eigen::Index bestK = -1;
 	std::vector<std::vector<Eigen::Index>> bestClustering;
 
-	std::vector<double> minRSSk;
-	std::vector<double> AICminRSSk;
-	for (Eigen::Index k = 1; k < maxK; k++)
+	bool exists = is_file_exist("optimal.csv");
+
+	std::mutex fileMutex;
+	std::ofstream testedKs{ "optimal.csv", std::ofstream::app };
+	if (!exists)
+	{
+		testedKs << "K,minRSS,AICminRSSk" << std::endl;
+	}
+
+	std::atomic<Eigen::Index> nextK{ 10 };
+
+	auto&& f = [&bestAICfactor, &bestK, &bestClustering, &fileMutex, &testedKs, &X, &nextK, maxIter, maxK]()
+	{
+		//Select random seeds completely randomly
+
+		std::mt19937 rnd{ std::random_device{}() };
+
+		bool running = true;
+		while (running)
+		{
+			const auto k = nextK.fetch_add(10);
+			if (k > maxK)
+			{
+				running = false;
+				return;
+			}
+
+			std::cout << "Trying K = " << k << std::endl;
+
+			double minRSS = std::numeric_limits<double>::max();
+			std::vector<std::vector<Eigen::Index>> localBestClustering;
+			for (Eigen::Index i = 0; i < maxIter; i++)
+			{
+				const auto res = computeKMeans(X, k, rnd);
+				const auto rss = std::get<1>(res);
+				if (rss < minRSS)
+				{
+					minRSS = rss;
+					localBestClustering = std::get<0>(res);
+				}
+			}
+			//minRSSk.emplace_back(minRSS);
+			const double AICfactor = minRSS + 2 * X.rows()*k;
+			fileMutex.lock();
+			testedKs << k << "," << minRSS << "," << AICfactor << std::endl;
+			if (AICfactor < bestAICfactor)
+			{
+				bestAICfactor = AICfactor;
+				bestK = k;
+				bestClustering = localBestClustering;
+			}
+			fileMutex.unlock();
+			//AICminRSSk.emplace_back(AICfactor);
+
+		}
+	};
+	
+	const auto nThreads = std::thread::hardware_concurrency();
+
+	std::vector<std::thread> threads;
+
+	for (size_t i = 0; i < nThreads; i++)
+	{
+		threads.emplace_back(f);
+	}
+
+	for (size_t i = 0; i < nThreads; i++)
+	{
+		threads[i].join();
+	}
+
+	//std::vector<double> minRSSk;
+	//std::vector<double> AICminRSSk;
+	/*for (Eigen::Index k = 400; k < maxK; k += 1)
 	{
 		std::cout << "Trying K = " << k << std::endl;
 		double minRSS = std::numeric_limits<double>::max();
@@ -144,6 +234,7 @@ std::tuple<std::vector<std::vector<Eigen::Index>>,Eigen::Index> findOptimalClust
 		}
 		minRSSk.emplace_back(minRSS);
 		const double AICfactor = minRSS + 2*X.rows()*k;
+		testedKs << k << "," << minRSS << "," << AICfactor << std::endl;
 		AICminRSSk.emplace_back(AICfactor);
 		if (AICfactor < bestAICfactor)
 		{
@@ -151,7 +242,7 @@ std::tuple<std::vector<std::vector<Eigen::Index>>,Eigen::Index> findOptimalClust
 			bestK = k;
 			bestClustering = localBestClustering;
 		}
-	}
+	}*/
 
 	return { bestClustering, bestK };
 }
