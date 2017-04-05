@@ -6,39 +6,55 @@
 #include <Eigen/Core>
 #include <atomic>
 #include <fstream>
+#include <map>
 #include <mutex>
 #include <iostream>
 #include <random>
+#include <set>
 #include <string>
 #include <thread>
 #include <tuple>
 #include <vector>
 
-std::pair<std::vector<std::string>, Eigen::MatrixXd> readVectors(const std::string& vectorFile)
+std::tuple<std::vector<std::pair<std::string, Eigen::Index>>, Eigen::MatrixXd, std::vector<std::string>> readVectors(const std::string& vectorFile)
 {
-	std::vector<std::string> ids;
+	std::vector<std::pair<std::string, Eigen::Index>> ids;
+	std::vector<std::string> classes;
 
 	std::ifstream vs{ vectorFile };
-	Eigen::Index M, N;
-	vs >> M >> N;
+	Eigen::Index N, M;
+	vs >> N >> M;
 
-	std::cout << "Document matrix is " << M << "x" << N << std::endl;
+	std::cout << "Document matrix is " << N << "x" << M << std::endl;
 
 	//Store matrix transposed such that rows are contiguous (Eigen is column major)
-	Eigen::MatrixXd vectors{ N, M };
+	Eigen::MatrixXd vectors{ M, N };
 
-	for (Eigen::Index i = 0; i < M; i++)
+	for (Eigen::Index i = 0; i < N; i++)
 	{
 		std::string id;
+		std::string c;
 		vs >> id;
-		ids.emplace_back(id);
-		for (Eigen::Index j = 0; j < N; j++)
+		vs >> c;
+		const auto it = std::find(classes.cbegin(), classes.cend(), c);
+		size_t index = classes.size();
+		if (it == classes.cend())
+		{
+			classes.emplace_back(c);
+		}
+		else
+		{
+			index = std::distance(classes.cbegin(), it);
+		}
+
+		ids.emplace_back(id, index);
+		for (Eigen::Index j = 0; j < M; j++)
 		{
 			vs >> vectors(j, i);
 		}
 	}
 	
-	return { ids, vectors };
+	return { ids, vectors, classes };
 
 }
 
@@ -68,6 +84,31 @@ double RSS(const Eigen::MatrixXd& centroids, const std::vector<std::vector<Eigen
 	}
 
 	return sum;
+}
+
+double purity(const std::vector<std::vector<Eigen::Index>>& clustering, const std::vector<std::pair<std::string, Eigen::Index>>& ids, const std::vector<std::string>& classes)
+{
+	double hits = 0;
+	double total = 0;
+
+	for (const auto& cluster : clustering)
+	{
+		Eigen::VectorXi counts = Eigen::VectorXi::Zero(classes.size());
+
+		for (const auto& id : cluster)
+		{
+			Eigen::Index c = ids[id].second;
+			counts(c)++;
+		}
+
+		const auto maxCount = counts.maxCoeff();
+		const auto sum = counts.sum();
+
+		hits += maxCount;
+		total += sum;
+	}
+
+	return (hits / total);
 }
 
 std::tuple<std::vector<std::vector<Eigen::Index>>, double> computeKMeans(const Eigen::MatrixXd& X, const Eigen::Index K, std::mt19937& rnd)
@@ -133,7 +174,7 @@ bool is_file_exist(const std::string&fileName)
 	return infile.good();
 }
 
-std::tuple<std::vector<std::vector<Eigen::Index>>,Eigen::Index> findOptimalClustering(const Eigen::MatrixXd& X)
+std::tuple<std::vector<std::vector<Eigen::Index>>, Eigen::Index> findOptimalClustering(const Eigen::MatrixXd& X, const std::vector<std::pair<std::string, Eigen::Index>>& ids, const std::vector<std::string>& classes)
 {
 
 	const Eigen::Index maxK = X.cols();
@@ -151,12 +192,12 @@ std::tuple<std::vector<std::vector<Eigen::Index>>,Eigen::Index> findOptimalClust
 	testedKs.precision(17);
 	if (!exists)
 	{
-		testedKs << "K,minRSS,AICminRSSk" << std::endl;
+		testedKs << "K,minRSS,AICminRSSk,purity" << std::endl;
 	}
 
-	std::atomic<Eigen::Index> nextK{ 10 };
+	std::atomic<Eigen::Index> nextK{ 1 };
 
-	auto&& f = [&bestAICfactor, &bestK, &bestClustering, &fileMutex, &testedKs, &X, &nextK, maxIter, maxK]()
+	auto&& f = [&bestAICfactor, &bestK, &bestClustering, &fileMutex, &testedKs, &X, &nextK, &ids, &classes, maxIter, maxK]()
 	{
 		//Select random seeds completely randomly
 
@@ -165,7 +206,7 @@ std::tuple<std::vector<std::vector<Eigen::Index>>,Eigen::Index> findOptimalClust
 		bool running = true;
 		while (running)
 		{
-			const auto k = nextK.fetch_add(10);
+			const auto k = nextK.fetch_add(1);
 			if (k > maxK)
 			{
 				running = false;
@@ -188,8 +229,9 @@ std::tuple<std::vector<std::vector<Eigen::Index>>,Eigen::Index> findOptimalClust
 			}
 			//minRSSk.emplace_back(minRSS);
 			const double AICfactor = minRSS + 2 * X.rows()*k;
+			const double p = purity(localBestClustering, ids, classes);
 			fileMutex.lock();
-			testedKs << k << "," << minRSS << "," << AICfactor << std::endl;
+			testedKs << k << "," << minRSS << "," << AICfactor << "," << p << std::endl;
 			if (AICfactor < bestAICfactor)
 			{
 				bestAICfactor = AICfactor;
@@ -248,7 +290,7 @@ std::tuple<std::vector<std::vector<Eigen::Index>>,Eigen::Index> findOptimalClust
 	return { bestClustering, bestK };
 }
 
-void writeClusters(const std::vector<std::string>& ids, const std::vector<std::vector<Eigen::Index>>& clusters, const std::string& filename)
+void writeClusters(const std::vector<std::pair<std::string, Eigen::Index>>& ids, const std::vector<std::vector<Eigen::Index>>& clusters, const std::string& filename)
 {
 	std::ofstream f{ filename };
 	//f << clusters.size() << std::endl;
@@ -257,7 +299,7 @@ void writeClusters(const std::vector<std::string>& ids, const std::vector<std::v
 	{
 		for (const auto& doc : clusters[i])
 		{
-			f << ids[doc] << "\tcluster" << i << std::endl;
+			f << ids[doc].first << "\tcluster" << i << std::endl;
 		}
 	}
 }
@@ -287,12 +329,15 @@ int __cdecl main(int argc, char* argv[])
 	std::cout << "Reading " << vectorFile << "..." << std::endl;
 
 	const auto docVecs = readVectors(vectorFile);
+	const auto& ids = std::get<0>(docVecs);
+	const auto& vectors = std::get<1>(docVecs);
+	const auto& classes = std::get<2>(docVecs);
 
 	std::vector<std::vector<Eigen::Index>> clusters;
 	if (optimize)
 	{
 		std::cout << "Determining optimal clustering using heuristic" << std::endl;
-		const auto res = findOptimalClustering(docVecs.second);
+		const auto res = findOptimalClustering(vectors, ids, classes);
 		K = std::get<1>(res);
 		clusters = std::get<0>(res);
 
@@ -304,14 +349,14 @@ int __cdecl main(int argc, char* argv[])
 
 		std::mt19937 rnd{ std::random_device{}() };
 
-		const auto res = computeKMeans(docVecs.second, K, rnd);
+		const auto res = computeKMeans(vectors, K, rnd);
 
 		clusters = std::get<0>(res);
 	}
 
 	std::cout << "Writing optimal clustering to " << outFile << std::endl;
 
-	writeClusters(docVecs.first, clusters, outFile);
+	writeClusters(ids, clusters, outFile);
 
     return 0;
 }
