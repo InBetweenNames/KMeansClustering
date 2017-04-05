@@ -5,7 +5,7 @@ Author: Shane Peelar (peelar@uwindsor.ca)
 If you choose to use this tool in your project, please cite me in your report.  You can use this BiBTeX entry to conveniently do so:
 
 ~~~
-@article{peelar, title={Vectorize.py}, url={https://github.com/InBetweenNames/IREmbeddingAndReport}, author={Peelar, Shane M}}
+@article{peelar, title={K-Means Clustering Engine}, url={https://github.com/InBetweenNames/KMeansClustering}, author={Peelar, Shane M}}
 ~~~
 
 This code is intended for the 60-538 course Information Retrieval at the University of Windsor.  A Visual Studio 2017 solution is provided for the code.
